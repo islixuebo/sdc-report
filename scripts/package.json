@@ -1,0 +1,8 @@
+{
+  "name": "sdc-report-generator",
+  "version": "1.0.0",
+  "description": "SDC数字化需求任务统计报告 — PPT生成依赖",
+  "dependencies": {
+    "pptxgenjs": "^3.12.0"
+  }
+}
