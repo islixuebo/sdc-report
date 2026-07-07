@@ -35,6 +35,7 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
 JIRA_URL = config.get('jira_url', '')
+JIRA_USERNAME = config.get('jira_username', '') or ''
 JIRA_TOKEN = config.get('jira_token', '')
 JQL_ACTIVE = config.get('jql_active', 'project = SDCDN AND issuetype in (任务, 改进) AND fixVersion = EMPTY')
 FIELDS_BASE = config.get('fields_base', 'key,summary,status,priority,customfield_10348,customfield_10300,customfield_10302,customfield_10458,created,reporter,name,resolutiondate')
@@ -44,11 +45,20 @@ if not JIRA_URL or not JIRA_TOKEN:
     sys.exit(1)
 
 # ===== 工具函数 =====
+def jira_auth_header():
+    """根据是否有用户名决定使用 Basic Auth 还是 Bearer Token"""
+    if JIRA_USERNAME:
+        import base64
+        auth_str = f"{JIRA_USERNAME}:{JIRA_TOKEN}"
+        auth_b64 = base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')
+        return f'Basic {auth_b64}'
+    return f'Bearer {JIRA_TOKEN}'
+
 def jira_fetch(jql, fields):
     """通用Jira查询，返回issues列表"""
     params = urllib.parse.urlencode({'jql': jql, 'maxResults': '200', 'fields': fields})
     req = urllib.request.Request(f"{JIRA_URL}?{params}", method='GET')
-    req.add_header('Authorization', f'Bearer {JIRA_TOKEN}')
+    req.add_header('Authorization', jira_auth_header())
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE

@@ -33,6 +33,12 @@ read -p "  输入: " input_jira_url
 JIRA_URL="${input_jira_url:-$DEFAULT_JIRA_URL}"
 
 echo ""
+echo "Jira 用户名（用于 Basic Auth，默认: 直接回车跳过）"
+echo "  如果未提供，将使用 Bearer Token 认证："
+read -p "  输入: " input_jira_username
+JIRA_USERNAME="${input_jira_username:-}"
+
+echo ""
 echo "Jira API Token（必填，不会保存在 Git 仓库中）"
 read -p "  输入: " input_jira_token
 if [ -z "$input_jira_token" ]; then
@@ -64,6 +70,7 @@ FEISHU_USER_ID="${input_user_id:-}"
 cat > "$CONFIG_FILE" << CONFIG_EOF
 {
   "jira_url": "$JIRA_URL",
+  "jira_username": "$JIRA_USERNAME",
   "jira_token": "$JIRA_TOKEN",
   "jql_active": "$JQL",
   "fields_base": "key,summary,status,priority,customfield_10348,customfield_10300,customfield_10302,customfield_10458,created,reporter,name,resolutiondate",
