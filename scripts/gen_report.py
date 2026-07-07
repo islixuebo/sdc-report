@@ -27,20 +27,7 @@ for candidate in [os.path.join(os.path.dirname(BASE_DIR), '.sdc_report_config.js
 if not CONFIG_FILE:
     print("=" * 60)
     print("【首次使用】未检测到配置文件 .sdc_report_config.json")
-    print("请在项目目录中创建该文件，内容如下：")
-    print("""
-{
-  "jira_url": "https://your-jira-instance.com/rest/api/2/search",
-  "jira_token": "your-jira-api-token",
-  "jql_active": "project = SDCDN AND issuetype in (任务, 改进) AND fixVersion = EMPTY",
-  "fields_base": "key,summary,status,priority,customfield_10348,customfield_10300,customfield_10302,customfield_10458,created,reporter,name,resolutiondate",
-  "feishu": {
-    "chat_id": "",
-    "user_id": ""
-  }
-}
-    """)
-    print("或运行初始化脚本：bash scripts/init_config.sh")
+    print("请在项目目录中创建该文件，或运行初始化脚本：bash scripts/init_config.sh")
     print("=" * 60)
     sys.exit(1)
 
@@ -56,11 +43,9 @@ if not JIRA_URL or not JIRA_TOKEN:
     print("错误：配置文件中缺少 jira_url 或 jira_token，请检查 .sdc_report_config.json")
     sys.exit(1)
 
-FEISHU_CHAT_ID = config.get('feishu', {}).get('chat_id', '')
-FEISHU_USER_ID = config.get('feishu', {}).get('user_id', '')
-
 # ===== 工具函数 =====
 def jira_fetch(jql, fields):
+    """通用Jira查询，返回issues列表"""
     params = urllib.parse.urlencode({'jql': jql, 'maxResults': '200', 'fields': fields})
     req = urllib.request.Request(f"{JIRA_URL}?{params}", method='GET')
     req.add_header('Authorization', f'Bearer {JIRA_TOKEN}')
@@ -85,6 +70,8 @@ def fmt_date(val):
         return ""
 
 # ===== 1. 从Jira拉取数据 =====
+
+# ===== 周期定义 =====
 now = datetime.now()
 year, month = now.year, now.month
 month_start = f"{year}-{month:02d}-01"
@@ -119,22 +106,21 @@ print(f"合并后: {len(issues_all)} 条（含当月完结）")
 # ===== 2. 数据处理规则 =====
 STATUS_MAP = {
     "需求完善": "补充需求",
-    "待排期": "排期中",
+    "待排期": "待开发",
     "需求验收中": "开发中",
     "已排期": "待开发",
     "开发中": "开发中",
-    "数字化审核": "数字化领导审核",
-    "所长审核": "需求方所长审核",
+    "数字化审核": "审核中",
+    "所长审核": "审核中",
     "暂停跟进": "暂停跟进",
     "已发布": "已发布",
     "评审关闭": "已关闭",
-    "不是需求": "不是需求",
-    "待审核": "待开发",
+    "不是需求": "已关闭",
 }
 
 SYSTEM_ORDER = ['RDM', 'SRDPM', 'MAP', 'OSM', 'TOM', 'JIRA', 'SCA', 'AI', 'SINE', 'SOM', 'Skills', 'Devops', '其他']
 PRIORITY_ORDER = ['P0', 'P1', 'P2', 'P3', 'P4']
-STATUS_ORDER = ['已发布', '已关闭', '待开发', '开发中', '数字化领导审核', '排期中', '需求方所长审核', '补充需求', '暂停跟进', '不是需求']
+STATUS_ORDER = ['已发布', '已关闭', '待开发', '开发中', '审核中', '补充需求', '暂停跟进']
 
 def sys_rank(s):
     try:
@@ -175,9 +161,11 @@ def clean_system(val):
     s = s.strip()
     if not s:
         return "其他"
+    # 优先精确匹配（处理大小写敏感的特殊名称如 Skills、Devops）
     for name in SYSTEM_ORDER[:-1]:
         if s.upper() == name.upper():
             return name
+    # 再尝试包含匹配（如 SRDPM【MOKA】包含 SRDPM）
     s_upper = s.upper()
     for name in SYSTEM_ORDER[:-1]:
         if name.upper() in s_upper:
@@ -188,9 +176,25 @@ def clean_reporter(name):
     if not name:
         return ""
     name = name.strip()
+    # 第1轮：剥离有空格前缀的职称（如 "郑彩玲 SPM"）
     name = re.sub(r'(?:\s+)(SE|SPM|STM|SEng|SWE|Dev|QA|TL|PL|MGR|ENG|FAE|OME|SQM|HW|AE|TPM|PM|PD|PO|BA|DA|SA|SVP|VP|Director|STL)$', '', name, flags=re.IGNORECASE)
+    # 第2轮：剥离无空格连写的职称（如 "吴焕杰TPM"），要求前面是中文或字母
     name = re.sub(r'(?<=[\u4e00-\u9fa5a-zA-Z])(SE|SPM|STM|SEng|SWE|Dev|QA|TL|PL|MGR|ENG|FAE|OME|SQM|HW|AE|TPM|PM|PD|PO|BA|DA|SA|SVP|VP|Director|STL)$', '', name, flags=re.IGNORECASE)
     return name.strip()
+
+def fmt_date(val):
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        s = val.get('value', '') or ''
+    else:
+        s = str(val)
+    s = s.strip()[:10]
+    try:
+        datetime.strptime(s, '%Y-%m-%d')
+        return s
+    except:
+        return ""
 
 tasks = []
 status_count_raw = {}
@@ -449,14 +453,14 @@ md.append("## 5. 周期分析\n")
 md.append(f"> 周期定义：当月 = {month_start} ~ {month_end} | 当周 = {week_start}（周一）~ {week_end}（周日）\n")
 
 md.append("### 当月统计\n")
-md.append("| 指标 | 数量 |")
+md.append(f"| 指标 | 数量 |")
 md.append("|------|------|")
 md.append(f"| 当月新增 | {len(month_new_tasks)} |")
 md.append(f"| 当月完结 | {len(month_done_tasks)} |")
 md.append(f"| 当前进行中 | {len(tasks)} |\n")
 
 md.append("### 本周统计\n")
-md.append("| 指标 | 数量 |")
+md.append(f"| 指标 | 数量 |")
 md.append("|------|------|")
 md.append(f"| 本周新增 | {len(week_new_tasks)} |")
 md.append(f"| 本周完结 | {len(week_done_tasks)} |\n")
@@ -515,6 +519,7 @@ print(f"\nMarkdown已生成: {md_path}")
 # ===== 7. 生成Excel报告 =====
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from copy import copy
 
 wb = openpyxl.Workbook()
 
@@ -528,7 +533,7 @@ thin_border = Border(
 title_font = Font(bold=True, size=14)
 section_font = Font(bold=True, size=12)
 
-# 统计总览 Sheet
+# --- 统计总览 Sheet ---
 ws_overview = wb.active
 ws_overview.title = '统计总览'
 
@@ -595,12 +600,13 @@ ws_overview.cell(row, 2).border = thin_border
 ws_overview.cell(row, 2).alignment = Alignment(horizontal='center')
 ws_overview.cell(row, 3, '100%').font = Font(bold=True)
 ws_overview.cell(row, 3).border = thin_border
+ws_overview.cell(row, 3).alignment = Alignment(horizontal='center')
 
 ws_overview.column_dimensions['A'].width = 18
 ws_overview.column_dimensions['B'].width = 12
 ws_overview.column_dimensions['C'].width = 12
 
-# 全部任务 Sheet
+# --- 全部任务 Sheet ---
 ws_all = wb.create_sheet('全部任务')
 headers = ['系统', '概要', '创建日期', '交付日', '报告人', '状态']
 for c, h in enumerate(headers, 1):
@@ -619,8 +625,8 @@ for r_idx, t in enumerate(tasks, 2):
             cell.alignment = Alignment(horizontal='center')
         if c_idx == 6:
             status_colors = {
-                '排期中': '3B82F6', '需求方所长审核': 'F59E0B', '补充需求': 'EF4444',
-                '暂停跟进': '94A3B8', '待开发': '8B5CF6', '已发布': '10B981', '已关闭': '64748B',
+                '审核中': 'D97706', '暂停跟进': '94A3B8', '待开发': '8B5CF6',
+                '已发布': '10B981', '已关闭': '64748B', '补充需求': 'EF4444',
             }
             clr = status_colors.get(val, '')
             if clr:
@@ -633,7 +639,7 @@ ws_all.column_dimensions['D'].width = 24
 ws_all.column_dimensions['E'].width = 10
 ws_all.column_dimensions['F'].width = 16
 
-# 按系统分Sheet
+# --- 按系统分Sheet ---
 for sys_name in SYSTEM_ORDER:
     sys_tasks_list = [t for t in tasks if t['system'] == sys_name]
     if not sys_tasks_list:
@@ -661,9 +667,10 @@ for sys_name in SYSTEM_ORDER:
 
 wb.move_sheet('全部任务', offset=-len(wb.sheetnames)+2)
 
-# 周期分析 Excel Sheet
+# ===== 周期分析 Excel Sheet =====
 def make_period_sheet(wb, sheet_name, task_list):
     ws = wb.create_sheet(sheet_name)
+    headers = ['系统', '概要', '创建日期', '交付日', '报告人', '状态']
     for c, h in enumerate(headers, 1):
         cell = ws.cell(1, c, h)
         cell.font = header_font_white
@@ -690,7 +697,7 @@ make_period_sheet(wb, '当月完结', month_done_tasks)
 make_period_sheet(wb, '本周新增', week_new_tasks)
 make_period_sheet(wb, '本周完结', week_done_tasks)
 
-# 优先级 Excel Sheet
+# ===== 优先级 Excel Sheet =====
 ws_pri = wb.create_sheet('按优先级')
 pri_headers = ['优先级', '系统', '概要', '创建日期', '交付日', '报告人', '状态']
 pri_header_fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
@@ -747,7 +754,7 @@ ver_info_path = os.path.join(BASE_DIR, '.ver_info.tmp')
 with open(ver_info_path, 'w', encoding='utf-8') as f:
     f.write(f"{today_str}\n{VER_TAG}\n")
 
-# 导出PPT所需数据
+# 导出PPT所需数据到JSON
 ppt_sys_stats = [{'name': name, 'count': sys_counts.get(name, 0), 'pct': f"{sys_counts.get(name, 0)/len(tasks)*100:.1f}%"} for name in SYSTEM_ORDER if sys_counts.get(name, 0) > 0]
 ppt_status_stats = [{'name': name, 'count': status_counts.get(name, 0), 'pct': f"{status_counts.get(name, 0)/len(tasks)*100:.1f}%"} for name in STATUS_ORDER if status_counts.get(name, 0) > 0]
 ppt_priority_stats = [{'name': name, 'count': priority_counts.get(name, 0), 'pct': f"{priority_counts.get(name, 0)/len(tasks)*100:.1f}%"} for name in PRIORITY_ORDER + ['(未设)'] if priority_counts.get(name, 0) > 0]
