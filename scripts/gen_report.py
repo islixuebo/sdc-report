@@ -90,6 +90,7 @@ week_start_date = now - __import__('datetime').timedelta(days=now.weekday())
 week_end_date = week_start_date + __import__('datetime').timedelta(days=6)
 week_start = week_start_date.strftime('%Y-%m-%d')
 week_end = week_end_date.strftime('%Y-%m-%d')
+last_monday = (now - __import__('datetime').timedelta(days=now.weekday() + 7)).strftime('%Y-%m-%d')
 
 print("正在从Jira拉取数据...")
 issues_active = jira_fetch(JQL_ACTIVE, FIELDS_BASE)
@@ -112,6 +113,17 @@ for i in issues_done_month:
             issues_dict[key].setdefault('_override_resdate', res)
 issues_all = list(issues_dict.values())
 print(f"合并后: {len(issues_all)} 条（含当月完结）")
+
+# ===== 上周变更任务拉取 =====
+JQL_LAST_WEEK = (
+    f'project = SDCDN AND issuetype in (任务, 改进) '
+    f'AND (status in (需求验收中, 已发布, 不是需求, 评审关闭) OR fixVersion = EMPTY) '
+    f'AND updated >= {last_monday} '
+    f'ORDER BY updated DESC'
+)
+print(f"\n正在拉取上周变更数据（{last_monday} 至今）...")
+issues_last_week = jira_fetch(JQL_LAST_WEEK, FIELDS_BASE)
+print(f"上周变更任务: {len(issues_last_week)} 条")
 
 # ===== 2. 数据处理规则 =====
 STATUS_MAP = {
@@ -248,6 +260,41 @@ print(f"处理后: {len(tasks)} 条任务")
 
 # ===== 3. 三层排序 =====
 tasks.sort(key=lambda t: (sys_rank(t['system']), priority_rank(t['priority']), status_rank(t['status']), date_rank(t['date'])))
+
+# ===== 上周变更任务处理 =====
+last_week_tasks = []
+for issue in issues_last_week:
+    fields = issue.get('fields', {})
+    raw_status = fields.get('status', {}).get('name', '')
+    pub_status = STATUS_MAP.get(raw_status, raw_status)
+    system = clean_system(fields.get('customfield_10348'))
+    reporter = clean_reporter(fields.get('reporter', {}).get('displayName', ''))
+    prop_date = fmt_date(fields.get('customfield_10458')) or fmt_date(fields.get('created', ''))
+    delivery = fmt_date(fields.get('customfield_10300', ''))
+    priority = fields.get('priority', {})
+    if isinstance(priority, dict):
+        priority = priority.get('name', '') or ''
+    else:
+        priority = str(priority) if priority else ''
+    priority = priority.strip()
+    updated = (fields.get('updated', '') or '')[:10]
+    fix_ver = fields.get('fixVersions', [])
+    ver_str = ','.join(v.get('name', '') for v in fix_ver) if fix_ver else '(无版本)'
+    last_week_tasks.append({
+        'key': issue.get('key', ''),
+        'system': system,
+        'summary': fields.get('summary', ''),
+        'date': prop_date,
+        'delivery': delivery,
+        'reporter': reporter,
+        'status': pub_status,
+        'raw_status': raw_status,
+        'priority': priority,
+        'updated': updated,
+        'fix_version': ver_str,
+    })
+
+print(f"上周变更任务处理后: {len(last_week_tasks)} 条")
 
 # ===== 3b. 周期分析 =====
 DONE_STATUSES = {'已发布', '已关闭'}
@@ -475,6 +522,17 @@ md.append("|------|------|")
 md.append(f"| 本周新增 | {len(week_new_tasks)} |")
 md.append(f"| 本周完结 | {len(week_done_tasks)} |\n")
 
+md.append("### 上周变更统计\n")
+md.append(f"> 查询范围：{last_monday} 至今，任务状态含 需求验收中/已发布/不是需求/评审关闭 或无版本\n")
+md.append(f"| 系统 | 任务数 |")
+md.append("|------|-------|")
+last_week_sys = Counter(t['system'] for t in last_week_tasks)
+for name in SYSTEM_ORDER:
+    cnt = last_week_sys.get(name, 0)
+    if cnt > 0:
+        md.append(f"| {name} | {cnt} |")
+md.append(f"| **合计** | **{len(last_week_tasks)}** |\n")
+
 def md_period_table_block(md, title, task_list):
     md.append(f"\n### {title}\n")
     md.append("| 系统 | 概要 | 创建日期 | 交付日 | 报告人 | 状态 |")
@@ -492,6 +550,15 @@ md_period_table_block(md, "当月新增任务清单", month_new_tasks)
 md_period_table_block(md, "当月完结任务清单", month_done_tasks)
 md_period_table_block(md, "本周新增任务清单", week_new_tasks)
 md_period_table_block(md, "本周完结任务清单", week_done_tasks)
+
+# ===== 上周变更任务清单（多列：含key/updated/fix_version） =====
+md.append(f"\n### 上周变更任务清单\n")
+md.append(f"> 查询范围：{last_monday} 至今，按更新时间倒序\n")
+md.append("| 任务Key | 系统 | 概要 | 状态 | 版本 | 更新日 | 报告人 |")
+md.append("|---------|------|------|------|------|--------|--------|")
+for t in last_week_tasks:
+    md.append(f"| {t['key']} | {t['system']} | {t['summary']} | {t['raw_status']} | {t['fix_version']} | {t['updated']} | {t['reporter']} |")
+md.append("")
 
 md.append("")
 md.append("## 6. 优先级分析\n")
@@ -707,6 +774,30 @@ make_period_sheet(wb, '当月完结', month_done_tasks)
 make_period_sheet(wb, '本周新增', week_new_tasks)
 make_period_sheet(wb, '本周完结', week_done_tasks)
 
+# ===== 上周变更 Excel Sheet =====
+ws_last_week = wb.create_sheet('上周变更')
+lw_headers = ['任务Key', '系统', '概要', '状态', '版本', '更新日', '报告人']
+for c, h in enumerate(lw_headers, 1):
+    cell = ws_last_week.cell(1, c, h)
+    cell.font = header_font_white
+    cell.fill = header_fill
+    cell.border = thin_border
+    cell.alignment = Alignment(horizontal='center')
+for r_idx, t in enumerate(last_week_tasks, 2):
+    vals = [t['key'], t['system'], t['summary'], t['raw_status'], t['fix_version'], t['updated'], t['reporter']]
+    for c_idx, val in enumerate(vals, 1):
+        cell = ws_last_week.cell(r_idx, c_idx, val)
+        cell.border = thin_border
+        if c_idx in (1, 2, 4, 5, 6, 7):
+            cell.alignment = Alignment(horizontal='center')
+ws_last_week.column_dimensions['A'].width = 12
+ws_last_week.column_dimensions['B'].width = 10
+ws_last_week.column_dimensions['C'].width = 60
+ws_last_week.column_dimensions['D'].width = 12
+ws_last_week.column_dimensions['E'].width = 18
+ws_last_week.column_dimensions['F'].width = 12
+ws_last_week.column_dimensions['G'].width = 10
+
 # ===== 优先级 Excel Sheet =====
 ws_pri = wb.create_sheet('按优先级')
 pri_headers = ['优先级', '系统', '概要', '创建日期', '交付日', '报告人', '状态']
@@ -791,7 +882,10 @@ ppt_data = {
     'month_done': {'count': len(month_done_tasks), 'tasks': ppt_tasks(month_done_tasks)},
     'week_new': {'count': len(week_new_tasks), 'tasks': ppt_tasks(week_new_tasks)},
     'week_done': {'count': len(week_done_tasks), 'tasks': ppt_tasks(week_done_tasks)},
+    'last_week': {'count': len(last_week_tasks), 'tasks': [[t['key'], t['system'], t['summary'], t['raw_status'], t['fix_version'], t['updated'], t['reporter']] for t in last_week_tasks]},
 }
 ppt_data_path = os.path.join(BASE_DIR, '.ppt_data.json')
+print(f"上周变更任务: {len(last_week_tasks)} 条（{last_monday} 至今）")
+
 with open(ppt_data_path, 'w', encoding='utf-8') as f:
     json.dump(ppt_data, f, ensure_ascii=False)
