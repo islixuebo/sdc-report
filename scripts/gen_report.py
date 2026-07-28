@@ -13,6 +13,10 @@ import ssl
 import urllib.request
 import urllib.parse
 
+# ===== 命令行参数 =====
+LAST_WEEK_ONLY = '--last-week' in sys.argv
+REPORT_MODE = '上周变更' if LAST_WEEK_ONLY else '全量'
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ===== 优先从上层目录读取配置 =====
@@ -93,12 +97,17 @@ week_end = week_end_date.strftime('%Y-%m-%d')
 last_monday = (now - __import__('datetime').timedelta(days=now.weekday() + 7)).strftime('%Y-%m-%d')
 
 print("正在从Jira拉取数据...")
-issues_active = jira_fetch(JQL_ACTIVE, FIELDS_BASE)
-print(f"活跃任务: {len(issues_active)} 条")
+if LAST_WEEK_ONLY:
+    issues_active = []
+    issues_done_month = []
+    print("【上周变更模式】跳过全量数据拉取")
+else:
+    issues_active = jira_fetch(JQL_ACTIVE, FIELDS_BASE)
+    print(f"活跃任务: {len(issues_active)} 条")
 
-JQL_DONE_MONTH = f"project = SDCDN AND issuetype in (任务, 改进) AND resolutiondate >= {month_start}"
-issues_done_month = jira_fetch(JQL_DONE_MONTH, FIELDS_BASE)
-print(f"当月完结任务: {len(issues_done_month)} 条")
+    JQL_DONE_MONTH = f"project = SDCDN AND issuetype in (任务, 改进) AND resolutiondate >= {month_start}"
+    issues_done_month = jira_fetch(JQL_DONE_MONTH, FIELDS_BASE)
+    print(f"当月完结任务: {len(issues_done_month)} 条")
 
 issues_dict = {}
 for i in issues_active:
@@ -111,8 +120,9 @@ for i in issues_done_month:
         res = i.get('fields', {}).get('resolutiondate', '')
         if res:
             issues_dict[key].setdefault('_override_resdate', res)
-issues_all = list(issues_dict.values())
-print(f"合并后: {len(issues_all)} 条（含当月完结）")
+if not LAST_WEEK_ONLY:
+    issues_all = list(issues_dict.values())
+    print(f"合并后: {len(issues_all)} 条（含当月完结）")
 
 # ===== 上周变更任务拉取 =====
 JQL_LAST_WEEK = (
@@ -121,9 +131,15 @@ JQL_LAST_WEEK = (
     f'AND updated >= {last_monday} '
     f'ORDER BY updated DESC'
 )
+FIELDS_LAST_WEEK = FIELDS_BASE + ',fixVersions,updated'
+
 print(f"\n正在拉取上周变更数据（{last_monday} 至今）...")
-issues_last_week = jira_fetch(JQL_LAST_WEEK, FIELDS_BASE)
+issues_last_week = jira_fetch(JQL_LAST_WEEK, FIELDS_LAST_WEEK)
 print(f"上周变更任务: {len(issues_last_week)} 条")
+
+if LAST_WEEK_ONLY:
+    issues_all = list(issues_last_week)
+    print(f"【上周变更模式】仅使用上周变更数据: {len(issues_all)} 条")
 
 # ===== 2. 数据处理规则 =====
 STATUS_MAP = {
@@ -388,7 +404,7 @@ from collections import defaultdict
 
 today_str = datetime.now().strftime('%Y-%m-%d')
 HISTORY_DIR = os.path.join(BASE_DIR, '历史报告')
-REPORT_BASE = 'SDC数字化需求任务统计报告'
+REPORT_BASE = 'SDC数字化需求任务统计报告' if not LAST_WEEK_ONLY else 'SDC数字化需求上周变更报告'
 EXTS = ['.md', '.xlsx', '.pptx']
 
 os.makedirs(HISTORY_DIR, exist_ok=True)
@@ -444,13 +460,19 @@ for fname in list(os.listdir(BASE_DIR)):
             print(f"已归档（旧版本）: {fname} → 历史/")
 
 # ===== 6. 生成Markdown报告 =====
-md_path = os.path.join(BASE_DIR, f'SDC数字化需求任务统计报告_{today_str}{VER_TAG}.md')
+report_title = 'SDC数字化需求任务统计报告' if not LAST_WEEK_ONLY else 'SDC数字化需求上周变更报告'
+md_path = os.path.join(BASE_DIR, f'{report_title}_{today_str}{VER_TAG}.md')
 
 md = []
-md.append("# SDC数字化需求任务统计报告\n")
+md.append(f"# {report_title}\n")
 md.append("## 1. 背景说明\n")
-md.append(f"- **数据来源**: JIRA Filter #11503 - SDC 数字化需求（未发布）")
-md.append(f"- **查询条件**: `project = SDCDN AND issuetype in (任务, 改进) AND fixVersion = EMPTY`")
+if LAST_WEEK_ONLY:
+    md.append(f"- **数据来源**: JIRA SDCDN 项目（上周变更）")
+    md.append(f"- **查询条件**: `project = SDCDN AND issuetype in (任务, 改进) AND (status in (需求验收中, 已发布, 不是需求, 评审关闭) OR fixVersion = EMPTY) AND updated >= {last_monday}`")
+    md.append(f"- **查询范围**: {last_monday} ~ 至今")
+else:
+    md.append(f"- **数据来源**: JIRA Filter #11503 - SDC 数字化需求（未发布）")
+    md.append(f"- **查询条件**: `project = SDCDN AND issuetype in (任务, 改进) AND fixVersion = EMPTY`")
 md.append(f"- **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 md.append(f"- **任务总数**: {len(tasks)}")
 md.append(f"- **项目**: SDC 数字化需求 (SDCDN)\n")
@@ -614,7 +636,7 @@ section_font = Font(bold=True, size=12)
 ws_overview = wb.active
 ws_overview.title = '统计总览'
 
-ws_overview.cell(1, 1, f'SDC数字化需求任务统计报告 - {today_str}')
+ws_overview.cell(1, 1, f'{REPORT_BASE} - {today_str}')
 ws_overview.cell(1, 1).font = title_font
 ws_overview.merge_cells('A1:D1')
 
@@ -838,7 +860,7 @@ ws_pri.column_dimensions['E'].width = 24
 ws_pri.column_dimensions['F'].width = 10
 ws_pri.column_dimensions['G'].width = 16
 
-xlsx_path = os.path.join(BASE_DIR, f'SDC数字化需求任务统计报告_{today_str}{VER_TAG}.xlsx')
+xlsx_path = os.path.join(BASE_DIR, f'{REPORT_BASE}_{today_str}{VER_TAG}.xlsx')
 wb.save(xlsx_path)
 print(f"Excel已生成: {xlsx_path}")
 
